@@ -21,6 +21,7 @@ Returning ``None`` allows the call unchanged.
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any, Optional
 
 try:  # package or standalone
@@ -136,6 +137,24 @@ def on_pre_tool_call(**kwargs: Any) -> Optional[dict]:
         msg = (f"🔌 Connect container '{args.get('container')}' to network "
                f"'{args.get('network')}'. Approve?")
         return _approve(msg, rule_key="docker-gate:network_connect")
+
+    if tool == "docker_run_once":
+        container = args.get("container")
+        command = args.get("command")
+        try:
+            V.validate_name(container)              # name first — reject garbage early
+            argv = V.validate_single_command(command)
+        except V.ValidationError as exc:
+            return _block(f"docker_run_once blocked by safety validator: {exc}")
+        kind = "read-only" if V.is_read_only_command(argv) else "MUTATING"
+        msg = (f"🖥️ exec ({kind}) inside container '{container}':\n"
+               f"    {command}\n"
+               f"This runs a single command INSIDE the container via `docker exec`. Approve?")
+        # Unique per call → the [a]lways allowlist entry can never match a future
+        # call, so EVERY exec is per-use approval regardless of which button is
+        # tapped (policy: no persisted trust for exec).
+        rule_key = f"docker_run_once:{container}:{uuid.uuid4().hex}"
+        return _approve(msg, rule_key=rule_key)
 
     # 4) Everything else: not ours — allow unchanged.
     return None

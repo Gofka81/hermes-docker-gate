@@ -36,6 +36,13 @@ except ImportError:  # pragma: no cover
 _DOCKER = "docker"
 _READ_TIMEOUT = 30
 _WRITE_TIMEOUT = 120
+_MAX_EXEC_OUTPUT = 60_000  # chars — keep exec/log dumps from flooding chat/context
+
+
+def _cap(text: str) -> str:
+    if text and len(text) > _MAX_EXEC_OUTPUT:
+        return text[:_MAX_EXEC_OUTPUT] + f"\n… [output truncated at {_MAX_EXEC_OUTPUT} chars]"
+    return text
 
 
 def _check_docker_available() -> bool:
@@ -230,9 +237,44 @@ def _handle_docker_network_connect(args: dict, **_kw) -> str:
     return tool_result(f"Connected '{container}' to network '{network}'.")
 
 
+DOCKER_RUN_ONCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "container": {"type": "string", "description": "Container to exec into."},
+        "command": {"type": "string",
+                    "description": "A SINGLE command to run inside the container "
+                                   "(NOT a shell — no pipes, chaining, redirection, "
+                                   "or substitution). e.g. 'cat /app/config.yaml'."},
+    },
+    "required": ["container", "command"],
+    "additionalProperties": False,
+}
+
+
+def _handle_docker_run_once(args: dict, **_kw) -> str:
+    """Run ONE command inside a running container via `docker exec` (arg array,
+    no shell). Reaches here only after the pre_tool_call hook secured approval;
+    re-validates as defense-in-depth. Output is redacted + size-capped."""
+    container = args.get("container")
+    command = args.get("command")
+    try:
+        V.validate_name(container)          # name first — reject garbage early
+        argv = V.validate_single_command(command)
+    except (KeyError, V.ValidationError) as exc:
+        if isinstance(exc, KeyError):
+            return tool_error("container and command are required")
+        return tool_error(f"blocked by safety validator: {exc}")
+    # docker exec <container> <argv...> — NO shell, so metacharacters are inert.
+    rc, out, err = _docker(["exec", container, *argv], timeout=_WRITE_TIMEOUT)
+    if rc != 0:
+        return tool_error(R.redact_text(err.strip()) or f"docker exec failed (rc {rc})")
+    combined = out if out else err
+    return tool_result(_cap(R.redact_text(combined)) or "(command produced no output)")
+
+
 # Sets used by the hook to classify tool calls.
 READ_TOOLS = {"docker_ps", "docker_logs", "docker_inspect", "docker_stats"}
-WRITE_TOOLS = {"docker_deploy", "docker_network_connect"}
+WRITE_TOOLS = {"docker_deploy", "docker_network_connect", "docker_run_once"}
 
 # (name, schema, handler, emoji) — consumed by register() in __init__.py
 TOOLS = (
@@ -242,4 +284,5 @@ TOOLS = (
     ("docker_stats", DOCKER_STATS_SCHEMA, _handle_docker_stats, "📊"),
     ("docker_deploy", DOCKER_DEPLOY_SCHEMA, _handle_docker_deploy, "🚀"),
     ("docker_network_connect", DOCKER_NETWORK_CONNECT_SCHEMA, _handle_docker_network_connect, "🔌"),
+    ("docker_run_once", DOCKER_RUN_ONCE_SCHEMA, _handle_docker_run_once, "🖥️"),
 )

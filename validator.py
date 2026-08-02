@@ -12,8 +12,10 @@ Pure logic — no Docker, no I/O — so it unit-tests in isolation, off-Pi.
 """
 from __future__ import annotations
 
+import os
 import re
-from typing import Iterable, Sequence
+import shlex
+from typing import Iterable, List, Sequence
 
 __all__ = [
     "ValidationError",
@@ -25,6 +27,8 @@ __all__ = [
     "scan_for_escape_flags",
     "validate_deploy",
     "validate_network_connect",
+    "validate_single_command",
+    "is_read_only_command",
 ]
 
 
@@ -210,3 +214,78 @@ def validate_deploy(
 def validate_network_connect(*, network: str, container: str) -> None:
     validate_network_name(network)
     validate_name(container)
+
+
+# ---------------------------------------------------------------------------
+# docker_run_once: single-command `docker exec` validation.
+# The REAL boundary is arg-array execution (shlex.split, no `sh -c`), which
+# makes chaining/redirection/substitution structurally impossible. The shell-
+# metacharacter check below is a friendly EARLY REJECT ("this is one command,
+# not a shell"), not the security guarantee.
+# ---------------------------------------------------------------------------
+
+# Chaining / redirection / substitution / background / pipe operators.
+_SHELL_META = re.compile(r"[;|&`<>]|\$\(")
+
+# Binaries that reach the host / daemon / kernel rather than staying inside the
+# target container — hard-reject (this tool is for in-container debugging only).
+_FORBIDDEN_EXEC_BINARIES = {
+    "docker", "podman", "docker-compose", "nerdctl",
+    "systemctl", "service", "nsenter", "chroot",
+    "mount", "umount", "reboot", "shutdown", "halt", "poweroff",
+    "init", "telinit", "kexec", "insmod", "modprobe", "iptables", "sysctl",
+}
+
+# Verbs treated as read-only for the APPROVAL PROMPT LABEL only (policy = every
+# exec is per-use approval regardless, so this never relaxes the gate — it just
+# tells the user "this looks read-only" vs "this MUTATES" when they approve).
+_READ_ONLY_VERBS = {
+    "cat", "ls", "grep", "egrep", "fgrep", "head", "tail", "wc", "find",
+    "ps", "env", "printenv", "df", "du", "stat", "pwd", "whoami", "id",
+    "uname", "hostname", "readlink", "file", "date", "less", "more",
+}
+_FIND_MUTATING_FLAGS = {"-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-ok", "-okdir"}
+
+
+def validate_single_command(command: str) -> List[str]:
+    """Validate ``command`` and return it as an argument array (no shell).
+
+    Raises ValidationError on empty input, shell metacharacters (early reject),
+    unparseable quoting, host/daemon-reaching binaries, or escape flags. The
+    returned argv is meant to be passed straight to ``docker exec <c> *argv``.
+    """
+    if not isinstance(command, str) or not command.strip():
+        raise ValidationError("command is required")
+    if _SHELL_META.search(command):
+        raise ValidationError(
+            "docker_run_once runs ONE command, not a shell — remove any of "
+            "; && || | ` $() > < & (no chaining, pipes, redirection, or "
+            "substitution). Run a single flat command instead."
+        )
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ValidationError(f"could not parse command (check quoting): {exc}")
+    if not argv:
+        raise ValidationError("empty command")
+    verb = os.path.basename(argv[0]).lower()
+    if verb in _FORBIDDEN_EXEC_BINARIES:
+        raise ValidationError(
+            f"'{verb}' is not allowed via docker_run_once: it reaches the host / "
+            f"docker daemon / kernel, not just this container"
+        )
+    # Defense-in-depth: an exec command can't carry container-escape flags either.
+    scan_for_escape_flags(argv)
+    return argv
+
+
+def is_read_only_command(argv: Sequence[str]) -> bool:
+    """Best-effort read-only classification for the approval prompt label."""
+    if not argv:
+        return False
+    verb = os.path.basename(str(argv[0])).lower()
+    if verb not in _READ_ONLY_VERBS:
+        return False
+    if verb == "find" and any(a in _FIND_MUTATING_FLAGS for a in argv):
+        return False
+    return True

@@ -39,6 +39,16 @@ own `redact_sensitive_text` as a catch-all.
 | `docker_stats` | read | none |
 | `docker_deploy` | write | **Telegram** |
 | `docker_network_connect` | write | **Telegram** |
+| `docker_run_once` | write (`docker exec`) | **Telegram, every call** |
+
+> **`docker_run_once` is NOT a shell.** It runs **one** flat command inside a
+> running container (`docker exec`, arg-array — no `sh -c`), so chaining, pipes,
+> redirection, and substitution are impossible by construction; the approval
+> prompt shows the exact command and whether it looks read-only or mutating.
+> Every call requires per-use approval — there is **no persisted "always" trust**
+> for exec, regardless of the command. Output is redacted and size-capped. It is
+> for debugging *inside* one container; host/daemon-reaching binaries (`docker`,
+> `systemctl`, `mount`, …) are rejected.
 
 ## Requirements
 
@@ -63,6 +73,7 @@ Pure-logic core, no Docker required:
 python3 tests/test_validator.py
 python3 tests/test_redact.py
 python3 tests/test_hook.py
+python3 tests/test_run_once.py
 ```
 
 ## Status
