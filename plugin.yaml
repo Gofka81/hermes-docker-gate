@@ -1,0 +1,14 @@
+name: hermes-docker-gate
+version: 0.1.0
+description: "Safe Docker read + manage from Hermes. Reads (ps/logs/inspect/stats) run instantly with secrets redacted; writes (deploy/network_connect) require the user's Telegram approval via Hermes' native approval gate; the terminal tool is blocked from touching Docker directly. Requires a reachable Docker endpoint (DOCKER_HOST); tools gate on availability."
+author: Gofka81
+kind: backend
+provides_tools:
+  - docker_ps
+  - docker_logs
+  - docker_inspect
+  - docker_stats
+  - docker_deploy
+  - docker_network_connect
+hooks:
+  - pre_tool_call
